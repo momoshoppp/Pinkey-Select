@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <!-- 版本標記：白標版 v1.0 -->
+    <!-- 版本標記：白標版 v1.1.1 -->
     <title>賣場管理系統</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
@@ -68,16 +68,14 @@
         // ═══════════════════════════════════════════════════════════════
         // ⚙️ 賣家設定區（出貨前由 Fann 填入買家的 Firebase 設定）
         // ═══════════════════════════════════════════════════════════════
-         // ⚙️ 賣家設定區
-const firebaseConfig = {
-  apiKey: "AIzaSyAoKwch-Oy0rEiA8msrYVP45GMuy6exF7M",
-  authDomain: "pinkeyselect.firebaseapp.com",
-  projectId: "pinkeyselect",
-  storageBucket: "pinkeyselect.firebasestorage.app",
-  messagingSenderId: "240325793645",
-  appId: "1:240325793645:web:9f089a472555d71c7f6c64"
-};
-
+        const firebaseConfig = {
+          apiKey: "AIzaSyAoKwch-Oy0rEiA8msrYVP45GMuy6exF7M",
+          authDomain: "pinkeyselect.firebaseapp.com",
+          projectId: "pinkeyselect",
+          storageBucket: "pinkeyselect.firebasestorage.app",
+          messagingSenderId: "240325793645",
+          appId: "1:240325793645:web:9f089a472555d71c7f6c64"
+        };
         // ═══════════════════════════════════════════════════════════════
 
         const SHIPPING_FEE = 38;
@@ -271,8 +269,9 @@ const firebaseConfig = {
             return { subtotal, qty };
         };
         // ✅ 計算折扣（以白名單品項小計為基礎）
-        const calcPromoDiscount = (promo, codeGroups) => {
-            if (!isPromotionActive(promo)) return 0;
+        const calcPromoDiscount = (promo, codeGroups, locked = false) => {
+            // locked=true 時跳過日期檢查（已鎖住的促銷快照）
+            if (!locked && !isPromotionActive(promo)) return 0;
             const { subtotal: eligibleTotal, qty: eligibleQty } = getEligibleSubtotal(promo, codeGroups);
             if (eligibleTotal === 0) return 0;
             switch (promo.type) {
@@ -318,16 +317,19 @@ const firebaseConfig = {
           const [orders, setOrders] = useState([]);
           const [priceBook, setPriceBook] = useState({});
           const [storeConfig, setStoreConfig] = useState({ 
-              freeShippingThreshold: 1500, 
-              myshipUrl: '', 
-              bankName: '',     // ✅ 新增：銀行名
-              bankCode: '',     // ✅ 新增：銀行代碼
-              bankAccount: '',  // ✅ 新增：帳號
-              bankHolder: ''    // ✅ 新增：戶名
+              freeShippingThreshold: 1500,
+              shippingFee: 38,
+              myshipUrl: '',
+              lineOaId: '',
+              bankName: '',
+              bankCode: '',
+              bankAccount: '',
+              bankHolder: ''
           });
           const [newFreeShippingThreshold, setNewFreeShippingThreshold] = useState('');
+          const [newShippingFee, setNewShippingFee] = useState('');
           const [newMyshipUrl, setNewMyshipUrl] = useState('');
-          // ✅ 新增：匯款設定編輯 state
+          const [newLineOaId, setNewLineOaId] = useState('');
           const [newBankName, setNewBankName] = useState('');
           const [newBankCode, setNewBankCode] = useState('');
           const [newBankAccount, setNewBankAccount] = useState('');
@@ -488,6 +490,8 @@ const firebaseConfig = {
                     setNewBankCode(config.bankCode || '');
                     setNewBankAccount(config.bankAccount || '');
                     setNewBankHolder(config.bankHolder || '');
+                    setNewShippingFee(config.shippingFee ?? 38);
+                    setNewLineOaId(config.lineOaId || '');
                 }
             });
             // ✅ 促銷活動監聽
@@ -517,25 +521,32 @@ const firebaseConfig = {
             const groups = {};
             orders.forEach(o => {
               const name = o.customerName || '未知';
-              if (!groups[name]) groups[name] = {
+              // ✅ v1.1.1: 同名+同日期才合併
+              const orderDate = o.createdAt?.seconds ? new Date(o.createdAt.seconds * 1000) : new Date();
+              const dateKey = `${orderDate.getFullYear()}-${String(orderDate.getMonth()+1).padStart(2,'0')}-${String(orderDate.getDate()).padStart(2,'0')}`;
+              const groupKey = `${name}__${dateKey}`;
+              if (!groups[groupKey]) groups[groupKey] = {
                   name, items: [], codeGroups: {}, itemTotal: 0, finalTotal: 0,
                   status: 'pending', date: o.createdAt, customerLineId: o.customerLineId || ''
               };
-              groups[name].items.push(o);
-              if (!groups[name].codeGroups[o.itemCode]) {
-                  groups[name].codeGroups[o.itemCode] = { items: [], totalQty: 0, priceStr: o.price };
+              groups[groupKey].items.push(o);
+              if (!groups[groupKey].codeGroups[o.itemCode]) {
+                  groups[groupKey].codeGroups[o.itemCode] = { items: [], totalQty: 0, priceStr: o.price };
               }
-              groups[name].codeGroups[o.itemCode].items.push(o);
-              groups[name].codeGroups[o.itemCode].totalQty += (Number(o.quantity) || 1);
-              if (o.status === 'shipped') groups[name].status = 'shipped';
-              else if (o.status === 'completed' && groups[name].status !== 'shipped') groups[name].status = 'completed';
-              if (o.customerLineId) groups[name].customerLineId = o.customerLineId;
-              // ✅ 新增：累加購物金折抵（只抓第一筆有的）
-              if (o.creditApplied && !groups[name].creditApplied) {
-                  groups[name].creditApplied = Number(o.creditApplied) || 0;
+              groups[groupKey].codeGroups[o.itemCode].items.push(o);
+              groups[groupKey].codeGroups[o.itemCode].totalQty += (Number(o.quantity) || 1);
+              if (o.status === 'shipped') groups[groupKey].status = 'shipped';
+              else if (o.status === 'completed' && groups[groupKey].status !== 'shipped') groups[groupKey].status = 'completed';
+              if (o.customerLineId) groups[groupKey].customerLineId = o.customerLineId;
+              if (o.creditApplied && !groups[groupKey].creditApplied) {
+                  groups[groupKey].creditApplied = Number(o.creditApplied) || 0;
+              }
+              if (o.promoSnapshot && !groups[groupKey].promoSnapshot) {
+                  groups[groupKey].promoSnapshot = o.promoSnapshot;
               }
             });
             const threshold = storeConfig.freeShippingThreshold || 1500;
+            const shippingFeeAmt = storeConfig.shippingFee ?? 38;
             Object.values(groups).forEach(g => {
                 let total = 0;
                 const totalQty = g.items.reduce((s, i) => s + (Number(i.quantity) || 1), 0);
@@ -545,16 +556,24 @@ const firebaseConfig = {
                 });
                 g.itemTotal = total;
                 g.hasShippingFee = g.itemTotal < threshold && g.itemTotal > 0;
-                const baseTotal = g.hasShippingFee ? g.itemTotal + SHIPPING_FEE : g.itemTotal;
-                // ✅ 促銷折扣（依訂單建立時間判斷，傳入 codeGroups 做白名單過濾）
-                const promoActive = (() => {
-                    if (!promotion || !promotion.enabled) return false;
+                g.shippingFeeAmt = shippingFeeAmt;
+                const baseTotal = g.hasShippingFee ? g.itemTotal + shippingFeeAmt : g.itemTotal;
+                let usedPromo = null;
+                let isLocked = false;
+                if (g.promoSnapshot && g.promoSnapshot.enabled) {
+                    usedPromo = g.promoSnapshot;
+                    isLocked = true;
+                } else if (promotion && promotion.enabled) {
                     const orderTime = g.date?.seconds ? new Date(g.date.seconds * 1000) : new Date();
-                    if (promotion.startAt && new Date(promotion.startAt) > orderTime) return false;
-                    if (promotion.endAt   && new Date(promotion.endAt)   < orderTime) return false;
-                    return true;
-                })();
-                g.promoDiscount = promoActive ? calcPromoDiscount(promotion, g.codeGroups) : 0;
+                    if ((!promotion.startAt || new Date(promotion.startAt) <= orderTime) &&
+                        (!promotion.endAt   || new Date(promotion.endAt)   >= orderTime)) {
+                        usedPromo = promotion;
+                        isLocked = true; // ✅ v1.1.1 BUG FIX
+                    }
+                }
+                g.promoDiscount = usedPromo ? calcPromoDiscount(usedPromo, g.codeGroups, isLocked) : 0;
+                g.promoName = usedPromo ? (usedPromo.name || '促銷折扣') : '';
+                g.promoUsed = usedPromo;
                 // ✅ 扣除購物金折抵
                 g.creditApplied = g.creditApplied || 0;
                 g.finalTotal = Math.max(0, baseTotal - g.promoDiscount - g.creditApplied);
@@ -562,7 +581,7 @@ const firebaseConfig = {
                 g.creditBalance = storeCredits[g.name]?.balance || 0;
             });
             return Object.values(groups).sort((a, b) => (b.date?.seconds || 0) - (a.date?.seconds || 0));
-          }, [orders, storeConfig.freeShippingThreshold, storeCredits, promotion]);
+          }, [orders, storeConfig.freeShippingThreshold, storeConfig.shippingFee, storeCredits, promotion]);
 
           // ✅ 新增：篩選後的訂單
           const filteredOrders = useMemo(() => {
@@ -672,7 +691,9 @@ const firebaseConfig = {
                       price: getPriceStr(priceBook[code]) || 0,
                       status: 'pending',
                       customerLineId: '',
-                      stockStatus: 'none'  // ✅ 新增：初始未訂貨
+                      stockStatus: 'none',
+                      // ✅ 入單時鎖住促銷快照
+                      ...(isPromotionActive(promotion) ? { promoSnapshot: { ...promotion } } : {})
                   });
               }
             });
@@ -1334,6 +1355,7 @@ const firebaseConfig = {
 
           // ✅ 新增：傳訊給客人（根據類型組不同訊息）
           const sendMessageToCustomer = (group, type) => {
+              const activeLineOaId = storeConfig.lineOaId || LINE_OA_ID;
               const itemList = Object.entries(group.codeGroups)
                   .map(([code, cg]) => `${code} x${cg.totalQty}`).join('、');
               
@@ -1375,7 +1397,7 @@ const firebaseConfig = {
                   window.open(url, '_blank', 'noopener,noreferrer');
               } else {
                   // 無 LINE ID → 開啟官方帳號帶訊息（可從這找人）
-                  url = `https://line.me/R/oaMessage/@${LINE_OA_ID}/?${encodeURIComponent(msg)}`;
+                  url = `https://line.me/R/oaMessage/@${activeLineOaId}/?${encodeURIComponent(msg)}`;
                   window.open(url, '_blank', 'noopener,noreferrer');
                   showMessage("已開啟 LINE，可在官方帳號找客人傳訊");
               }
@@ -1777,10 +1799,10 @@ const firebaseConfig = {
                                     <div className="flex items-center gap-2">
                                         <Tag size={12} className="text-[#E07B00]"/>
                                         <span className="text-[11px] font-black text-[#E07B00]">
-                                            {promotion.name || '促銷折扣'}
+                                            {g.promoName || '促銷折扣'}
                                         </span>
                                         <span className="text-[10px] font-bold text-[#E07B00]/70">
-                                            ({promoLabel(promotion)})
+                                            ({promoLabel(g.promoUsed)})
                                         </span>
                                     </div>
                                     <span className="text-[11px] font-black text-[#E07B00]">
@@ -2540,27 +2562,27 @@ const firebaseConfig = {
                         <Settings size={14}/> 系統設定
                     </h3>
                     <div className="space-y-4">
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="space-y-1.5">
+                            <label className="text-[11px] font-bold text-[#555555] flex items-center gap-1 uppercase tracking-tighter"><Truck size={12}/> 免運門檻</label>
+                            <input type="number" value={newFreeShippingThreshold} onChange={e => setNewFreeShippingThreshold(e.target.value)} placeholder="1500" className="w-full py-4 px-4 bg-[#F5F1EA] rounded-2xl text-xs font-bold outline-none"/>
+                          </div>
+                          <div className="space-y-1.5">
+                            <label className="text-[11px] font-bold text-[#555555] flex items-center gap-1 uppercase tracking-tighter"><Truck size={12}/> 運費金額</label>
+                            <input type="number" value={newShippingFee} onChange={e => setNewShippingFee(e.target.value)} placeholder="38" className="w-full py-4 px-4 bg-[#F5F1EA] rounded-2xl text-xs font-bold outline-none"/>
+                          </div>
+                        </div>
+                        <p className="text-[10px] text-[#6B6B6B] font-bold -mt-2">💡 未滿免運門檻才收運費</p>
                         <div className="space-y-1.5">
-                          <label className="text-[11px] font-bold text-[#555555] flex items-center gap-1 uppercase tracking-tighter">
-                              <Truck size={12}/> 免運門檻 (元)
-                          </label>
-                          <input type="number" value={newFreeShippingThreshold}
-                              onChange={e => setNewFreeShippingThreshold(e.target.value)}
-                              className="w-full py-4 px-5 bg-[#F5F1EA] rounded-2xl text-xs font-bold outline-none"/>
+                          <label className="text-[11px] font-bold text-[#555555] flex items-center gap-1 uppercase tracking-tighter"><LinkIcon size={12}/> 賣貨便網址</label>
+                          <input value={newMyshipUrl} onChange={e => setNewMyshipUrl(e.target.value)} className="w-full py-4 px-5 bg-[#F5F1EA] rounded-2xl text-xs font-bold outline-none"/>
                         </div>
                         <div className="space-y-1.5">
-                          <label className="text-[11px] font-bold text-[#555555] flex items-center gap-1 uppercase tracking-tighter">
-                              <LinkIcon size={12}/> 賣貨便網址
-                          </label>
-                          <input value={newMyshipUrl} onChange={e => setNewMyshipUrl(e.target.value)}
-                              className="w-full py-4 px-5 bg-[#F5F1EA] rounded-2xl text-xs font-bold outline-none"/>
-                        </div>
-                        <div className="bg-[#F1F4E8] rounded-2xl p-4 border border-[#C9D4B0] space-y-1">
-                            <div className="text-[11px] font-bold text-[#6B7A4A] flex items-center gap-1">
-                                <MessageCircle size={12}/> LINE 官方帳號設定
-                            </div>
-                            <div className="text-xs font-black text-[#3A3A3A]">@{LINE_OA_ID}</div>
-                            <div className="text-[10px] text-[#555555] font-bold">客人點「通知我已下單」會跳至此帳號</div>
+                          <label className="text-[11px] font-bold text-[#555555] flex items-center gap-1 uppercase tracking-tighter"><MessageCircle size={12}/> LINE 官方帳號 ID</label>
+                          <div className="flex items-center bg-[#F5F1EA] rounded-2xl px-4 border border-[#EDE6DA]">
+                              <span className="text-[#888] font-bold shrink-0">@</span>
+                              <input type="text" value={newLineOaId} onChange={e => setNewLineOaId(e.target.value.replace(/^@/, ''))} placeholder="輸入官方帳號 ID（不含 @）" className="flex-1 py-4 px-2 bg-transparent text-xs font-bold outline-none"/>
+                          </div>
                         </div>
 
                         {/* ✅ 匯款帳號設定 */}
@@ -2604,18 +2626,21 @@ const firebaseConfig = {
                         </div>
 
                         <button onClick={async () => {
-                            if (user) {
+                            if (!user) { showMessage("尚未連線雲端，請稍後再試 ⚠️", 'error'); return; }
+                            try {
                                 await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'storeConfig'), {
-                                    freeShippingThreshold: Number(newFreeShippingThreshold),
-                                    myshipUrl: newMyshipUrl,
+                                    freeShippingThreshold: Number(newFreeShippingThreshold) || 1500,
+                                    shippingFee: Number(newShippingFee) || 38,
+                                    myshipUrl: newMyshipUrl.trim(),
+                                    lineOaId: newLineOaId.trim().replace(/^@/, ''),
                                     bankName: newBankName.trim(),
                                     bankCode: newBankCode.trim(),
                                     bankAccount: newBankAccount.trim(),
                                     bankHolder: newBankHolder.trim()
                                 });
                                 showMessage("系統設定已儲存 ✅");
-                            } else {
-                                showMessage("目前處於暫存模式，無法儲存", 'warn');
+                            } catch (err) {
+                                showMessage("儲存失敗：" + (err.message || err.code || "請確認網路"), 'error');
                             }
                         }} className="w-full py-4 bg-[#333] text-white rounded-2xl text-xs font-bold shadow-lg active:scale-95 transition-all">
                             儲存設定
